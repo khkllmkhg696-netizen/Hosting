@@ -18,7 +18,7 @@ from telegram.ext import (
 
 BOT_TOKEN = "8718244006:AAHcgec0NRj_5JMrKilj1MHDnWtDwFMACEA"
 RENDER_API_KEY = "rnd_OdDPHfiuKsDkOAilf5J7fqLqOygE"
-GITHUB_TOKEN = "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"
+GITHUB_TOKEN = "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"
 GITHUB_USERNAME = "hosting-bot-user"
 GITHUB_API = "https://api.github.com"
 RENDER_API = "https://api.render.com/v1"
