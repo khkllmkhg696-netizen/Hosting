@@ -16,10 +16,9 @@ from telegram.ext import (
     ContextTypes,
 )
 
-BOT_TOKEN = "8718244006:AAHcgec0NRj_5JMrKilj1MHDnWtDwFMACEA"
-RENDER_API_KEY = "rnd_OdDPHfiuKsDkOAilf5J7fqLqOygE"
-GITHUB_TOKEN = "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"
-GITHUB_USERNAME = "hosting-bot-user"
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+RENDER_API_KEY = os.environ.get("RENDER_API_KEY", "")
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 GITHUB_API = "https://api.github.com"
 RENDER_API = "https://api.render.com/v1"
 
