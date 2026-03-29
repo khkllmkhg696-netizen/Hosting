@@ -4,6 +4,7 @@ import asyncio
 import tempfile
 import base64
 import aiohttp
+from aiohttp import web
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -234,7 +235,7 @@ async def create_render_service(
         "Content-Type": "application/json",
     }
     payload = {
-        "type": "background_worker",
+        "type": "web_service",
         "name": service_name,
         "ownerId": None,
         "repo": repo_url,
@@ -375,19 +376,46 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
 
 
-def main():
-    app = Application.builder().token(BOT_TOKEN).build()
+async def ping_handler(request):
+    return web.Response(text="✅ Bot is alive!", content_type="text/plain")
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(
+
+async def run_web_server():
+    port = int(os.environ.get("PORT", 8080))
+    web_app = web.Application()
+    web_app.router.add_get("/", ping_handler)
+    web_app.router.add_get("/ping", ping_handler)
+    runner = web.AppRunner(web_app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    print(f"Keep-alive web server running on port {port}")
+    print(f"UptimeRobot / Ping URL: http://YOUR_RENDER_URL:{port}/ping")
+
+
+async def run_bot():
+    tg_app = Application.builder().token(BOT_TOKEN).build()
+
+    tg_app.add_handler(CommandHandler("start", start))
+    tg_app.add_handler(
         CallbackQueryHandler(main_menu_callback, pattern="^main_menu$")
     )
-    app.add_handler(CallbackQueryHandler(button_handler))
-    app.add_handler(MessageHandler(filters.Document.ALL, file_handler))
+    tg_app.add_handler(CallbackQueryHandler(button_handler))
+    tg_app.add_handler(MessageHandler(filters.Document.ALL, file_handler))
 
-    print("Bot is running...")
-    app.run_polling()
+    print("Telegram bot is running...")
+    await tg_app.initialize()
+    await tg_app.start()
+    await tg_app.updater.start_polling()
+    await asyncio.Event().wait()
+
+
+async def main():
+    await asyncio.gather(
+        run_web_server(),
+        run_bot(),
+    )
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
