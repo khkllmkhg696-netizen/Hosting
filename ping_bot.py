@@ -27,7 +27,7 @@ WAITING_FOR_INTERVAL = 2
 
 user_data_store: dict = {}
 
-TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8716286773:AAFGjKJpQgQm3qNwr44cdI1e85ooBaO_RyU")
 PORT = int(os.environ.get("PORT", 8080))
 
 START_TIME = datetime.utcnow()
