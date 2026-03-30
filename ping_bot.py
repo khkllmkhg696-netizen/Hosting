@@ -30,8 +30,35 @@ user_data_store: dict = {}
 
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8716286773:AAFGjKJpQgQm3qNwr44cdI1e85ooBaO_RyU")
 PORT = int(os.environ.get("PORT", 8080))
-
 START_TIME = datetime.utcnow()
+
+
+# ─────────────────────────────────────────
+#   Access Control
+# ─────────────────────────────────────────
+
+ALLOWED_USERNAMES = {"f611f6", "c9aac"}
+DEVELOPER_USERNAME = "c9aac"
+
+
+def is_allowed(user) -> bool:
+    if user is None:
+        return False
+    username = (user.username or "").lower().lstrip("@")
+    return username in ALLOWED_USERNAMES
+
+
+def denied_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("👨‍💻 المطور", url=f"https://t.me/{DEVELOPER_USERNAME}")
+    ]])
+
+
+async def send_denied(message) -> None:
+    await message.reply_text(
+        "🔒 هذا البوت شخصي ولا يمكن استعماله بدون إذن.",
+        reply_markup=denied_keyboard(),
+    )
 
 
 # ─────────────────────────────────────────
@@ -42,12 +69,18 @@ async def health_handler(request: web.Request) -> web.Response:
     uptime_seconds = int((datetime.utcnow() - START_TIME).total_seconds())
     hours, remainder = divmod(uptime_seconds, 3600)
     minutes, seconds = divmod(remainder, 60)
+    active_pings = sum(
+        1
+        for u in user_data_store.values()
+        for entry in u.get("url_data", {}).values()
+        if entry.get("running")
+    )
     return web.Response(
         text=(
             f"✅ Bot is alive!\n"
             f"Uptime: {hours}h {minutes}m {seconds}s\n"
             f"Active users: {len(user_data_store)}\n"
-            f"Running pings: {sum(1 for u in user_data_store.values() if u.get('running'))}"
+            f"Running pings: {active_pings}"
         ),
         content_type="text/plain",
     )
@@ -78,35 +111,45 @@ def is_valid_url(url: str) -> bool:
 
 def default_user_data() -> dict:
     return {
-        "url": "",
+        "url_list": [],
+        "url_data": {},
         "interval": 1,
+        "random_mode": False,
+        "random_min": None,
+        "random_max": None,
+    }
+
+
+def default_url_entry() -> dict:
+    return {
         "running": False,
         "task": None,
         "ping_message_id": None,
         "ping_count": 0,
-        "random_mode": False,
-        "random_min": None,
-        "random_max": None,
         "random_index": 0,
     }
 
 
+def get_url_at(user_id: int, idx: int):
+    url_list = user_data_store.get(user_id, {}).get("url_list", [])
+    if 0 <= idx < len(url_list):
+        return url_list[idx]
+    return None
+
+
+# ─────────────────────────────────────────
+#   Keyboards
+# ─────────────────────────────────────────
+
 def main_keyboard(user_id: int) -> InlineKeyboardMarkup:
     data = user_data_store.get(user_id, {})
-    url = data.get("url", "")
+    url_list = data.get("url_list", [])
+    url_data_map = data.get("url_data", {})
     interval = data.get("interval", 1)
-    is_running = data.get("running", False)
-    random_mode = data.get("random_mode", False)
     random_min = data.get("random_min")
     random_max = data.get("random_max")
 
-    if url:
-        url_label = f"🔗 الرابط: {url[:28]}..." if len(url) > 28 else f"🔗 الرابط: {url}"
-    else:
-        url_label = "➕ إضافة رابط"
-
     interval_label = f"⏱ الوقت: {interval} دقيقة"
-    ping_label = "⛔ إيقاف Ping" if is_running else "▶️ بدء Ping"
 
     if random_min is not None and random_max is not None:
         random_label = f"🎲 الوقت العشوائي: {random_min}-{random_max} د"
@@ -114,12 +157,51 @@ def main_keyboard(user_id: int) -> InlineKeyboardMarkup:
         random_label = "🎲 الوقت العشوائي"
 
     keyboard = [
-        [InlineKeyboardButton(url_label, callback_data="add_url")],
+        [InlineKeyboardButton("➕ إضافة رابط", callback_data="add_url")],
         [InlineKeyboardButton(interval_label, callback_data="set_interval")],
         [InlineKeyboardButton(random_label, callback_data="random_menu")],
-        [InlineKeyboardButton(ping_label, callback_data="toggle_ping")],
     ]
+
+    for idx, url in enumerate(url_list):
+        is_running = url_data_map.get(url, {}).get("running", False)
+        status = "🟢" if is_running else "🔴"
+        short_url = url[:32] + "..." if len(url) > 32 else url
+        keyboard.append([InlineKeyboardButton(
+            f"{status} {short_url}",
+            callback_data=f"url_view_{idx}"
+        )])
+
     return InlineKeyboardMarkup(keyboard)
+
+
+def url_live_keyboard(idx: int, is_running: bool) -> InlineKeyboardMarkup:
+    if is_running:
+        keyboard = [[
+            InlineKeyboardButton("⛔ إيقاف Ping", callback_data=f"stop_ping_{idx}"),
+            InlineKeyboardButton("🗑 حذف الرابط", callback_data=f"remove_url_{idx}"),
+        ]]
+    else:
+        keyboard = [
+            [
+                InlineKeyboardButton("▶️ بدء Ping", callback_data=f"start_ping_{idx}"),
+                InlineKeyboardButton("🗑 حذف الرابط", callback_data=f"remove_url_{idx}"),
+            ],
+            [InlineKeyboardButton("🔙 رجوع للقائمة", callback_data="back_main")],
+        ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+def confirm_remove_keyboard(idx: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ تأكيد الحذف", callback_data=f"confirm_remove_{idx}"),
+        InlineKeyboardButton("❌ إلغاء", callback_data=f"cancel_remove_{idx}"),
+    ]])
+
+
+def back_to_menu_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("🔙 رجوع للقائمة", callback_data="back_main")
+    ]])
 
 
 def random_keyboard(user_id: int) -> InlineKeyboardMarkup:
@@ -148,13 +230,18 @@ def random_keyboard(user_id: int) -> InlineKeyboardMarkup:
 # ─────────────────────────────────────────
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.effective_user.id
+    user = update.effective_user
+    if not is_allowed(user):
+        await send_denied(update.message)
+        return
+
+    user_id = user.id
     if user_id not in user_data_store:
         user_data_store[user_id] = default_user_data()
 
     await update.message.reply_text(
         "👋 مرحباً! أنا بوت Ping.\n\n"
-        "يمكنني زيارة أي رابط بشكل تلقائي كل فترة زمنية تحددها.\n\n"
+        "يمكنني زيارة عدة روابط بشكل تلقائي كل فترة زمنية تحددها.\n\n"
         "استخدم الأزرار أدناه للبدء:",
         reply_markup=main_keyboard(user_id),
     )
@@ -163,8 +250,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
-    user_id = query.from_user.id
 
+    user = query.from_user
+    if not is_allowed(user):
+        await send_denied(query.message)
+        return ConversationHandler.END
+
+    user_id = user.id
     if user_id not in user_data_store:
         user_data_store[user_id] = default_user_data()
 
@@ -173,7 +265,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # ── القائمة الرئيسية ──────────────────
     if data == "add_url":
         await query.message.reply_text(
-            "🔗 أرسل الرابط الذي تريد زيارته:\n\n"
+            "🔗 أرسل الرابط الذي تريد إضافته:\n\n"
             "مثال: https://example.com"
         )
         return WAITING_FOR_URL
@@ -186,72 +278,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return WAITING_FOR_INTERVAL
 
     elif data == "back_main":
-        await query.message.edit_text(
-            "استخدم الأزرار أدناه:",
+        await query.message.reply_text(
+            "📋 القائمة الرئيسية:",
             reply_markup=main_keyboard(user_id),
         )
         return ConversationHandler.END
 
-    elif data == "toggle_ping":
-        is_running = user_data_store[user_id].get("running", False)
-        url = user_data_store[user_id].get("url", "")
-
-        if not is_running:
-            if not url:
-                await query.message.reply_text(
-                    "⚠️ يجب إضافة رابط أولاً!",
-                    reply_markup=main_keyboard(user_id),
-                )
-                return ConversationHandler.END
-
-            random_mode = user_data_store[user_id].get("random_mode", False)
-            random_min = user_data_store[user_id].get("random_min")
-            random_max = user_data_store[user_id].get("random_max")
-
-            if random_mode and (random_min is None or random_max is None):
-                await query.message.reply_text(
-                    "⚠️ الوضع العشوائي مفعّل لكن لم تحدد النطاق الزمني!\n"
-                    "اذهب لـ 🎲 الوقت العشوائي وأضف الوقت أولاً.",
-                    reply_markup=main_keyboard(user_id),
-                )
-                return ConversationHandler.END
-
-            user_data_store[user_id]["running"] = True
-            user_data_store[user_id]["ping_message_id"] = None
-            user_data_store[user_id]["ping_count"] = 0
-            user_data_store[user_id]["random_index"] = 0
-            task = asyncio.create_task(ping_loop(user_id, context))
-            user_data_store[user_id]["task"] = task
-
-            if random_mode:
-                mode_text = f"🎲 وضع عشوائي: {random_min}-{random_max} دقيقة"
-            else:
-                interval = user_data_store[user_id].get("interval", 1)
-                mode_text = f"⏱ كل {interval} دقيقة"
-
-            await query.message.reply_text(
-                f"✅ بدأ الـ Ping!\n\n"
-                f"🔗 الرابط: {url}\n"
-                f"{mode_text}",
-                reply_markup=main_keyboard(user_id),
-            )
-        else:
-            user_data_store[user_id]["running"] = False
-            task = user_data_store[user_id].get("task")
-            if task:
-                task.cancel()
-                user_data_store[user_id]["task"] = None
-            user_data_store[user_id]["ping_message_id"] = None
-            user_data_store[user_id]["ping_count"] = 0
-            user_data_store[user_id]["random_index"] = 0
-
-            await query.message.reply_text(
-                "⛔ تم إيقاف الـ Ping.",
-                reply_markup=main_keyboard(user_id),
-            )
-        return ConversationHandler.END
-
-    # ── قائمة الوقت العشوائي ─────────────
+    # ── الوقت العشوائي ────────────────────
     elif data == "random_menu":
         await query.message.reply_text(
             "🎲 إعدادات الوقت العشوائي:",
@@ -262,7 +295,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     elif data == "toggle_random":
         random_mode = user_data_store[user_id].get("random_mode", False)
         user_data_store[user_id]["random_mode"] = not random_mode
-
         status = "✅ مفعّل" if not random_mode else "❌ معطّل"
         await query.message.reply_text(
             f"تم تغيير الوضع العشوائي: {status}",
@@ -279,11 +311,183 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return WAITING_FOR_RANDOM_RANGE
 
+    # ── عرض حالة رابط معيّن ──────────────
+    elif data.startswith("url_view_"):
+        idx = int(data.split("_")[-1])
+        url = get_url_at(user_id, idx)
+        if url is None:
+            await query.message.reply_text("❌ الرابط غير موجود، ربما تم حذفه.")
+            return ConversationHandler.END
+
+        url_entry = user_data_store[user_id]["url_data"].get(url, {})
+        is_running = url_entry.get("running", False)
+        ping_count = url_entry.get("ping_count", 0)
+        now = datetime.utcnow().strftime("%H:%M:%S")
+
+        if is_running:
+            text = (
+                f"✅ Ping يعمل!\n"
+                f"🔗 {url}\n"
+                f"🔢 عدد المرات: {ping_count}\n"
+                f"🕐 آخر تحديث: {now} UTC"
+            )
+        else:
+            text = (
+                f"⏸ Ping متوقف\n"
+                f"🔗 {url}\n"
+                f"🔢 عدد المرات: {ping_count}"
+            )
+
+        sent = await query.message.reply_text(
+            text,
+            reply_markup=url_live_keyboard(idx, is_running),
+        )
+        # هذه الرسالة تصبح الرسالة الحية للرابط
+        user_data_store[user_id]["url_data"].setdefault(url, default_url_entry())
+        user_data_store[user_id]["url_data"][url]["ping_message_id"] = sent.message_id
+        return ConversationHandler.END
+
+    # ── إيقاف Ping ────────────────────────
+    elif data.startswith("stop_ping_"):
+        idx = int(data.split("_")[-1])
+        url = get_url_at(user_id, idx)
+        if url is None:
+            await query.message.reply_text("❌ الرابط غير موجود.")
+            return ConversationHandler.END
+
+        url_entry = user_data_store[user_id]["url_data"].get(url, {})
+        url_entry["running"] = False
+        task = url_entry.get("task")
+        if task:
+            task.cancel()
+            url_entry["task"] = None
+
+        ping_count = url_entry.get("ping_count", 0)
+        await query.message.edit_text(
+            f"⛔ تم إيقاف الـ Ping\n"
+            f"🔗 {url}\n"
+            f"🔢 عدد المرات: {ping_count}",
+            reply_markup=url_live_keyboard(idx, False),
+        )
+        return ConversationHandler.END
+
+    # ── بدء Ping ──────────────────────────
+    elif data.startswith("start_ping_"):
+        idx = int(data.split("_")[-1])
+        url = get_url_at(user_id, idx)
+        if url is None:
+            await query.message.reply_text("❌ الرابط غير موجود.")
+            return ConversationHandler.END
+
+        url_entry = user_data_store[user_id]["url_data"].setdefault(url, default_url_entry())
+        url_entry["running"] = True
+        url_entry["ping_count"] = 0
+        url_entry["random_index"] = 0
+        # استخدام نفس الرسالة الحالية كرسالة حية
+        url_entry["ping_message_id"] = query.message.message_id
+
+        task = asyncio.create_task(ping_loop(user_id, url, context))
+        url_entry["task"] = task
+
+        await query.message.edit_text(
+            f"🔄 جاري البدء...\n🔗 {url}",
+            reply_markup=url_live_keyboard(idx, True),
+        )
+        return ConversationHandler.END
+
+    # ── طلب حذف رابط ─────────────────────
+    elif data.startswith("remove_url_"):
+        idx = int(data.split("_")[-1])
+        url = get_url_at(user_id, idx)
+        if url is None:
+            await query.message.edit_text(
+                "❌ الرابط غير موجود.",
+                reply_markup=back_to_menu_keyboard(),
+            )
+            return ConversationHandler.END
+
+        await query.message.edit_text(
+            f"⚠️ هل أنت متأكد أنك تريد إزالة الرابط؟\n\n🔗 {url}",
+            reply_markup=confirm_remove_keyboard(idx),
+        )
+        return ConversationHandler.END
+
+    # ── تأكيد الحذف ──────────────────────
+    elif data.startswith("confirm_remove_"):
+        idx = int(data.split("_")[-1])
+        url = get_url_at(user_id, idx)
+
+        if url is None:
+            await query.message.edit_text(
+                "✅ الرابط غير موجود أو تم حذفه مسبقاً.",
+                reply_markup=back_to_menu_keyboard(),
+            )
+            return ConversationHandler.END
+
+        # إيقاف الـ Ping إن كان يعمل
+        url_entry = user_data_store[user_id]["url_data"].get(url, {})
+        if url_entry.get("running"):
+            url_entry["running"] = False
+            task = url_entry.get("task")
+            if task:
+                task.cancel()
+
+        # حذف الرابط
+        user_data_store[user_id]["url_list"].remove(url)
+        user_data_store[user_id]["url_data"].pop(url, None)
+
+        await query.message.edit_text(
+            f"✅ تم حذف الرابط بنجاح.\n🔗 {url}",
+            reply_markup=back_to_menu_keyboard(),
+        )
+        return ConversationHandler.END
+
+    # ── إلغاء الحذف ──────────────────────
+    elif data.startswith("cancel_remove_"):
+        idx = int(data.split("_")[-1])
+        url = get_url_at(user_id, idx)
+        if url is None:
+            await query.message.edit_text(
+                "❌ الرابط غير موجود.",
+                reply_markup=back_to_menu_keyboard(),
+            )
+            return ConversationHandler.END
+
+        url_entry = user_data_store[user_id]["url_data"].get(url, {})
+        is_running = url_entry.get("running", False)
+        ping_count = url_entry.get("ping_count", 0)
+        now = datetime.utcnow().strftime("%H:%M:%S")
+
+        if is_running:
+            text = (
+                f"✅ Ping يعمل!\n"
+                f"🔗 {url}\n"
+                f"🔢 عدد المرات: {ping_count}\n"
+                f"🕐 آخر تحديث: {now} UTC"
+            )
+        else:
+            text = (
+                f"⏸ Ping متوقف\n"
+                f"🔗 {url}\n"
+                f"🔢 عدد المرات: {ping_count}"
+            )
+
+        await query.message.edit_text(
+            text,
+            reply_markup=url_live_keyboard(idx, is_running),
+        )
+        return ConversationHandler.END
+
     return ConversationHandler.END
 
 
 async def receive_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user_id = update.effective_user.id
+    user = update.effective_user
+    if not is_allowed(user):
+        await send_denied(update.message)
+        return ConversationHandler.END
+
+    user_id = user.id
     url = update.message.text.strip()
 
     if not is_valid_url(url):
@@ -295,27 +499,49 @@ async def receive_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     if user_id not in user_data_store:
         user_data_store[user_id] = default_user_data()
 
-    was_running = user_data_store[user_id].get("running", False)
-    if was_running:
-        user_data_store[user_id]["running"] = False
-        task = user_data_store[user_id].get("task")
-        if task:
-            task.cancel()
-            user_data_store[user_id]["task"] = None
-        user_data_store[user_id]["ping_message_id"] = None
-        user_data_store[user_id]["ping_count"] = 0
+    url_list = user_data_store[user_id]["url_list"]
+    if url in url_list:
+        await update.message.reply_text(
+            "⚠️ هذا الرابط موجود مسبقاً في قائمتك!",
+            reply_markup=main_keyboard(user_id),
+        )
+        return ConversationHandler.END
 
-    user_data_store[user_id]["url"] = url
+    # إضافة الرابط وبدء الـ Ping فوراً
+    url_list.append(url)
+    url_entry = default_url_entry()
+    url_entry["running"] = True
+    user_data_store[user_id]["url_data"][url] = url_entry
+
+    task = asyncio.create_task(ping_loop(user_id, url, context))
+    url_entry["task"] = task
+
+    interval = user_data_store[user_id].get("interval", 1)
+    random_mode = user_data_store[user_id].get("random_mode", False)
+    random_min = user_data_store[user_id].get("random_min")
+    random_max = user_data_store[user_id].get("random_max")
+
+    if random_mode and random_min is not None and random_max is not None:
+        mode_text = f"🎲 وضع عشوائي: {random_min}-{random_max} دقيقة"
+    else:
+        mode_text = f"⏱ كل {interval} دقيقة"
 
     await update.message.reply_text(
-        f"✅ تم حفظ الرابط:\n{url}",
+        f"✅ تم إضافة الرابط وبدأ الـ Ping!\n\n"
+        f"🔗 {url}\n"
+        f"{mode_text}",
         reply_markup=main_keyboard(user_id),
     )
     return ConversationHandler.END
 
 
 async def receive_interval(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user_id = update.effective_user.id
+    user = update.effective_user
+    if not is_allowed(user):
+        await send_denied(update.message)
+        return ConversationHandler.END
+
+    user_id = user.id
     text = update.message.text.strip()
 
     try:
@@ -331,34 +557,23 @@ async def receive_interval(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if user_id not in user_data_store:
         user_data_store[user_id] = default_user_data()
 
-    was_running = user_data_store[user_id].get("running", False)
-    if was_running:
-        user_data_store[user_id]["running"] = False
-        task = user_data_store[user_id].get("task")
-        if task:
-            task.cancel()
-            user_data_store[user_id]["task"] = None
-        user_data_store[user_id]["ping_message_id"] = None
-        user_data_store[user_id]["ping_count"] = 0
-
     user_data_store[user_id]["interval"] = interval
 
-    if was_running:
-        await update.message.reply_text(
-            f"✅ تم تغيير الوقت إلى {interval} دقيقة.\n"
-            "⚠️ تم إيقاف الـ Ping، اضغط على بدء Ping مرة أخرى.",
-            reply_markup=main_keyboard(user_id),
-        )
-    else:
-        await update.message.reply_text(
-            f"✅ تم حفظ الوقت: {interval} دقيقة",
-            reply_markup=main_keyboard(user_id),
-        )
+    await update.message.reply_text(
+        f"✅ تم حفظ الوقت: {interval} دقيقة\n\n"
+        "⚠️ سيُطبق هذا الوقت على جميع الروابط النشطة والجديدة.",
+        reply_markup=main_keyboard(user_id),
+    )
     return ConversationHandler.END
 
 
 async def receive_random_range(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user_id = update.effective_user.id
+    user = update.effective_user
+    if not is_allowed(user):
+        await send_denied(update.message)
+        return ConversationHandler.END
+
+    user_id = user.id
     text = update.message.text.strip()
 
     try:
@@ -385,17 +600,20 @@ async def receive_random_range(update: Update, context: ContextTypes.DEFAULT_TYP
 
     user_data_store[user_id]["random_min"] = min_val
     user_data_store[user_id]["random_max"] = max_val
-    user_data_store[user_id]["random_index"] = 0
 
     await update.message.reply_text(
         f"✅ تم حفظ النطاق: {min_val}-{max_val} دقيقة\n\n"
-        f"سيتم زيارة الرابط بالتسلسل: {min_val} ← {' ← '.join(str(i) for i in range(min_val+1, max_val+1))} ← {min_val} ...",
+        f"سيتم زيارة الرابط بالتسلسل: {min_val} ← {' ← '.join(str(i) for i in range(min_val + 1, max_val + 1))} ← {min_val} ...",
         reply_markup=random_keyboard(user_id),
     )
     return ConversationHandler.END
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    user = update.effective_user
+    if not is_allowed(user):
+        await send_denied(update.message)
+        return ConversationHandler.END
     await update.message.reply_text("تم الإلغاء.")
     return ConversationHandler.END
 
@@ -404,24 +622,33 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 #   Ping Loop
 # ─────────────────────────────────────────
 
-async def ping_loop(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
-    while user_data_store.get(user_id, {}).get("running", False):
-        url = user_data_store[user_id].get("url", "")
-        ping_count = user_data_store[user_id].get("ping_count", 0) + 1
-        user_data_store[user_id]["ping_count"] = ping_count
+async def ping_loop(user_id: int, url: str, context: ContextTypes.DEFAULT_TYPE) -> None:
+    while True:
+        user = user_data_store.get(user_id)
+        if not user:
+            break
+        url_entry = user.get("url_data", {}).get(url)
+        if not url_entry or not url_entry.get("running", False):
+            break
 
-        random_mode = user_data_store[user_id].get("random_mode", False)
-        random_min = user_data_store[user_id].get("random_min", 1)
-        random_max = user_data_store[user_id].get("random_max", 1)
-        random_index = user_data_store[user_id].get("random_index", 0)
+        url_list = user.get("url_list", [])
+        idx = url_list.index(url) if url in url_list else 0
+
+        ping_count = url_entry.get("ping_count", 0) + 1
+        url_entry["ping_count"] = ping_count
+
+        random_mode = user.get("random_mode", False)
+        random_min = user.get("random_min")
+        random_max = user.get("random_max")
+        random_index = url_entry.get("random_index", 0)
 
         if random_mode and random_min is not None and random_max is not None:
             cycle_length = random_max - random_min + 1
             current_interval = random_min + (random_index % cycle_length)
-            user_data_store[user_id]["random_index"] = random_index + 1
+            url_entry["random_index"] = random_index + 1
             interval_label = f"🎲 {current_interval} دقيقة (عشوائي {random_min}-{random_max})"
         else:
-            current_interval = user_data_store[user_id].get("interval", 1)
+            current_interval = user.get("interval", 1)
             interval_label = f"⏱ كل {current_interval} دقيقة"
 
         now = datetime.utcnow().strftime("%H:%M:%S")
@@ -450,22 +677,30 @@ async def ping_loop(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
                 f"{interval_label}"
             )
 
-        try:
-            ping_message_id = user_data_store[user_id].get("ping_message_id")
+        reply_markup = url_live_keyboard(idx, True)
 
+        try:
+            ping_message_id = url_entry.get("ping_message_id")
             if ping_message_id is None:
-                sent = await context.bot.send_message(chat_id=user_id, text=msg)
-                user_data_store[user_id]["ping_message_id"] = sent.message_id
+                sent = await context.bot.send_message(
+                    chat_id=user_id, text=msg, reply_markup=reply_markup
+                )
+                url_entry["ping_message_id"] = sent.message_id
             else:
                 await context.bot.edit_message_text(
                     chat_id=user_id,
                     message_id=ping_message_id,
                     text=msg,
+                    reply_markup=reply_markup,
                 )
+        except asyncio.CancelledError:
+            return
         except Exception:
             try:
-                sent = await context.bot.send_message(chat_id=user_id, text=msg)
-                user_data_store[user_id]["ping_message_id"] = sent.message_id
+                sent = await context.bot.send_message(
+                    chat_id=user_id, text=msg, reply_markup=reply_markup
+                )
+                url_entry["ping_message_id"] = sent.message_id
             except Exception:
                 pass
 
